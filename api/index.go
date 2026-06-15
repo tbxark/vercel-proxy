@@ -38,6 +38,9 @@ type Config struct {
 
 	// DisableCompression asks upstream servers for an uncompressed response.
 	DisableCompression bool `json:"disableCompression,omitempty"`
+
+	// DisableGlobalCORS disables proxy-managed CORS headers for all responses.
+	DisableGlobalCORS bool `json:"disableGlobalCors,omitempty"`
 }
 
 // Proxy is a configurable reverse proxy handler.
@@ -45,6 +48,7 @@ type Proxy struct {
 	client             *http.Client
 	domainWhitelist    []string
 	disableCompression bool
+	globalCORS         bool
 }
 
 // NewProxy creates a reusable proxy handler with explicit configuration.
@@ -57,6 +61,7 @@ func NewProxy(config Config) (*Proxy, error) {
 		client:             client,
 		domainWhitelist:    normalizeDomainWhitelist(config.DomainWhitelist),
 		disableCompression: config.DisableCompression,
+		globalCORS:         !config.DisableGlobalCORS,
 	}
 	proxy.client.CheckRedirect = proxy.checkRedirect
 
@@ -90,12 +95,14 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}()
 
-	setCORSHeaders(w)
+	if p.globalCORS {
+		setCORSHeaders(w)
 
-	// Handle the OPTIONS preflight request
-	if r.Method == http.MethodOptions {
-		w.WriteHeader(http.StatusOK)
-		return
+		// Handle the OPTIONS preflight request
+		if r.Method == http.MethodOptions {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
 	}
 
 	// Redirect to the GitHub repository
@@ -140,13 +147,16 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	defer closeResponseBody(resp)
 
-	if err := proxyRaw(w, resp, r); err != nil {
+	if err := proxyRaw(w, resp, r, p.globalCORS); err != nil {
 		log.Printf("Proxy response error: %v", err)
 	}
 }
 
-func proxyRaw(w http.ResponseWriter, resp *http.Response, req *http.Request) error {
+func proxyRaw(w http.ResponseWriter, resp *http.Response, req *http.Request, globalCORS bool) error {
 	copyHeaders(resp.Header, w.Header())
+	if globalCORS {
+		setCORSHeaders(w)
+	}
 	if w.Header().Get("Referer") != "" {
 		w.Header().Del("Referer")
 		w.Header().Add("Referer", req.Host)
@@ -162,9 +172,18 @@ func proxyRaw(w http.ResponseWriter, resp *http.Response, req *http.Request) err
 }
 
 func setCORSHeaders(w http.ResponseWriter) {
+	clearCORSHeaders(w.Header())
 	w.Header().Set("Access-Control-Allow-Origin", corsAllowOrigin)
 	w.Header().Set("Access-Control-Allow-Methods", corsAllowMethods)
 	w.Header().Set("Access-Control-Allow-Headers", corsAllowHeaders)
+}
+
+func clearCORSHeaders(header http.Header) {
+	for k := range header {
+		if strings.HasPrefix(strings.ToLower(k), "access-control-") {
+			header.Del(k)
+		}
+	}
 }
 
 func proxyURL(r *http.Request) string {

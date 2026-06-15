@@ -48,7 +48,8 @@ func TestConfigUnmarshalsFromJSON(t *testing.T) {
 	data := []byte(`{
 		"socks5Proxy": "127.0.0.1:1080",
 		"domainWhitelist": ["example.com", "api.example.org"],
-		"disableCompression": true
+		"disableCompression": true,
+		"disableGlobalCors": true
 	}`)
 
 	var config Config
@@ -65,13 +66,21 @@ func TestConfigUnmarshalsFromJSON(t *testing.T) {
 	if !config.DisableCompression {
 		t.Fatal("DisableCompression = false, want true")
 	}
+	if !config.DisableGlobalCORS {
+		t.Fatal("DisableGlobalCORS = false, want true")
+	}
 }
 
-func TestHandlerHandlesPreflight(t *testing.T) {
+func TestProxyHandlesPreflightByDefault(t *testing.T) {
+	proxy, err := NewProxy(Config{})
+	if err != nil {
+		t.Fatalf("NewProxy() error = %v", err)
+	}
+
 	req := httptest.NewRequest(http.MethodOptions, "/https://example.com", nil)
 	recorder := httptest.NewRecorder()
 
-	Handler(recorder, req)
+	proxy.ServeHTTP(recorder, req)
 
 	resp := recorder.Result()
 	defer resp.Body.Close()
@@ -157,6 +166,77 @@ func TestHandlerProxiesResponse(t *testing.T) {
 	}
 	if string(body) != "response-body" {
 		t.Fatalf("body = %q, want %q", body, "response-body")
+	}
+}
+
+func TestProxyOverridesCORSHeadersByDefault(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "https://upstream.example")
+		w.Header().Set("Access-Control-Allow-Credentials", "true")
+		w.Header().Set("Access-Control-Expose-Headers", "X-Upstream-Header")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer upstream.Close()
+
+	proxy, err := NewProxy(Config{})
+	if err != nil {
+		t.Fatalf("NewProxy() error = %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/"+upstream.URL, nil)
+	recorder := httptest.NewRecorder()
+
+	proxy.ServeHTTP(recorder, req)
+
+	resp := recorder.Result()
+	defer resp.Body.Close()
+
+	if got := resp.Header.Values("Access-Control-Allow-Origin"); len(got) != 1 || got[0] != corsAllowOrigin {
+		t.Fatalf("Access-Control-Allow-Origin values = %#v, want %#v", got, []string{corsAllowOrigin})
+	}
+	if got := resp.Header.Get("Access-Control-Allow-Methods"); got != corsAllowMethods {
+		t.Fatalf("Access-Control-Allow-Methods = %q, want %q", got, corsAllowMethods)
+	}
+	if got := resp.Header.Get("Access-Control-Allow-Headers"); got != corsAllowHeaders {
+		t.Fatalf("Access-Control-Allow-Headers = %q, want %q", got, corsAllowHeaders)
+	}
+	if got := resp.Header.Get("Access-Control-Allow-Credentials"); got != "" {
+		t.Fatalf("Access-Control-Allow-Credentials = %q, want empty", got)
+	}
+	if got := resp.Header.Get("Access-Control-Expose-Headers"); got != "" {
+		t.Fatalf("Access-Control-Expose-Headers = %q, want empty", got)
+	}
+}
+
+func TestProxyKeepsCORSHeadersWhenGlobalCORSDisabled(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "https://upstream.example")
+		w.Header().Set("Access-Control-Allow-Credentials", "true")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer upstream.Close()
+
+	proxy, err := NewProxy(Config{DisableGlobalCORS: true})
+	if err != nil {
+		t.Fatalf("NewProxy() error = %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/"+upstream.URL, nil)
+	recorder := httptest.NewRecorder()
+
+	proxy.ServeHTTP(recorder, req)
+
+	resp := recorder.Result()
+	defer resp.Body.Close()
+
+	if got := resp.Header.Values("Access-Control-Allow-Origin"); len(got) != 1 || got[0] != "https://upstream.example" {
+		t.Fatalf("Access-Control-Allow-Origin values = %#v, want %#v", got, []string{"https://upstream.example"})
+	}
+	if got := resp.Header.Get("Access-Control-Allow-Credentials"); got != "true" {
+		t.Fatalf("Access-Control-Allow-Credentials = %q, want true", got)
+	}
+	if got := resp.Header.Get("Access-Control-Allow-Methods"); got != "" {
+		t.Fatalf("Access-Control-Allow-Methods = %q, want empty", got)
 	}
 }
 
