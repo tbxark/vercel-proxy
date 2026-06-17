@@ -6,6 +6,26 @@ Simple http proxy for Vercel.
 
 [![Deploy with Vercel](https://vercel.com/button)](https://vercel.com/new/clone?repository-url=https%3A%2F%2Fgithub.com%2FTBXark%2Fvercel-proxy)
 
+### Docker
+
+```bash
+docker run -d --name vercel-proxy -p 3000:3000 ghcr.io/tbxark/vercel-proxy:latest
+```
+
+Or with docker compose:
+
+```bash
+docker compose up -d
+```
+
+To customize behavior, mount a JSON config file and pass `--config`:
+
+```bash
+docker run -d --name vercel-proxy -p 3000:3000 \
+  -v $(pwd)/config.json:/config/config.json \
+  ghcr.io/tbxark/vercel-proxy:latest --addr :3000 --config /config/config.json
+```
+
 ### Usage
 
 ```javascript

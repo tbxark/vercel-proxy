@@ -10,6 +10,9 @@ import (
 	"github.com/tbxark/vercel-proxy/api"
 )
 
+// BuildVersion is set at build time via -ldflags.
+var BuildVersion = "dev"
+
 func main() {
 	addr := flag.String("addr", ":3000", "address to listen on")
 	configPath := flag.String("config", "", "path to JSON config file")

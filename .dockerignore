@@ -1,0 +1,10 @@
+.idea
+.vscode
+.vercel
+.github
+bin
+build
+.gitattributes
+.gitignore
+/README.md
+/docker-compose.yaml

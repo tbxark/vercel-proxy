@@ -1,0 +1,11 @@
+services:
+  app:
+    image: ghcr.io/tbxark/vercel-proxy:latest
+    pull_policy: always
+    ports:
+      - "3000:3000"
+    restart: always
+    # To customize proxy behavior, mount a config file and pass --config.
+    # volumes:
+    #   - ./config.json:/config/config.json
+    # command: ["--addr", ":3000", "--config", "/config/config.json"]
