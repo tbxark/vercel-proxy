@@ -33,7 +33,8 @@ type Config struct {
 	Socks5Proxy string `json:"socks5Proxy,omitempty"`
 
 	// DomainWhitelist limits target hosts. Empty means all domains are allowed.
-	// Entries match the exact domain and its subdomains.
+	// Entries match the exact domain and its subdomains. Wildcard characters * and ? are supported.
+	// Prefix an entry with - to exclude it. Suffix :port limits the entry to that port; :0 allows any port.
 	DomainWhitelist []string `json:"domainWhitelist,omitempty"`
 
 	// DisableCompression asks upstream servers for an uncompressed response.
@@ -46,7 +47,7 @@ type Config struct {
 // Proxy is a configurable reverse proxy handler.
 type Proxy struct {
 	client             *http.Client
-	domainWhitelist    []string
+	domainWhitelist    []domainRule
 	disableCompression bool
 	globalCORS         bool
 }
@@ -118,7 +119,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid url: "+rawURL, http.StatusBadRequest)
 		return
 	}
-	if err := p.checkDomain(targetURL.Hostname()); err != nil {
+	if err := p.checkDomain(targetURL); err != nil {
 		http.Error(w, err.Error(), http.StatusForbidden)
 		return
 	}
@@ -261,22 +262,22 @@ func parseSocks5ProxyURL(rawProxy string) (*url.URL, error) {
 	return proxyURL, nil
 }
 
-func (p *Proxy) isDomainAllowed(host string) bool {
-	return isDomainAllowed(host, p.domainWhitelist)
+func (p *Proxy) isDomainAllowed(targetURL *url.URL) bool {
+	return isDomainURLAllowed(targetURL, p.domainWhitelist)
 }
 
-func (p *Proxy) checkDomain(host string) error {
-	if p.isDomainAllowed(host) {
+func (p *Proxy) checkDomain(targetURL *url.URL) error {
+	if p.isDomainAllowed(targetURL) {
 		return nil
 	}
-	return &domainNotAllowedError{host: host}
+	return &domainNotAllowedError{host: targetURL.Hostname()}
 }
 
 func (p *Proxy) checkRedirect(req *http.Request, via []*http.Request) error {
 	if len(via) >= 10 {
 		return errors.New("stopped after 10 redirects")
 	}
-	return p.checkDomain(req.URL.Hostname())
+	return p.checkDomain(req.URL)
 }
 
 type domainNotAllowedError struct {
@@ -287,39 +288,192 @@ func (e *domainNotAllowedError) Error() string {
 	return "domain not allowed: " + e.host
 }
 
-func isDomainAllowed(host string, whitelist []string) bool {
+type domainRule struct {
+	exclude bool
+	pattern string
+	regexp  *regexp.Regexp
+	port    string
+}
+
+func isDomainAllowed(host string, whitelist []domainRule) bool {
+	target := normalizeTargetHostPort(host, "")
+	return isDomainTargetAllowed(target, whitelist)
+}
+
+func isDomainURLAllowed(targetURL *url.URL, whitelist []domainRule) bool {
+	target := normalizeTargetHostPort(targetURL.Host, targetURL.Scheme)
+	return isDomainTargetAllowed(target, whitelist)
+}
+
+func isDomainTargetAllowed(target domainTarget, whitelist []domainRule) bool {
 	if len(whitelist) == 0 {
 		return true
 	}
 
-	host = normalizeDomain(host)
-	for _, domain := range whitelist {
-		if host == domain || strings.HasSuffix(host, "."+domain) {
-			return true
+	allowed := false
+	for _, rule := range whitelist {
+		if !rule.matches(target) {
+			continue
 		}
+		if rule.exclude {
+			return false
+		}
+		allowed = true
 	}
-	return false
+	return allowed
 }
 
-func normalizeDomainWhitelist(domains []string) []string {
-	whitelist := make([]string, 0, len(domains))
-	seen := make(map[string]struct{}, len(domains))
-	for _, domain := range domains {
-		domain = normalizeDomain(domain)
-		if domain == "" {
+func normalizeDomainWhitelist(entries []string) []domainRule {
+	whitelist := make([]domainRule, 0, len(entries))
+	seen := make(map[string]struct{}, len(entries))
+	for _, entry := range entries {
+		rule, ok := normalizeDomainRule(entry)
+		if !ok {
 			continue
 		}
-		if _, ok := seen[domain]; ok {
+		key := rule.key()
+		if _, ok := seen[key]; ok {
 			continue
 		}
-		seen[domain] = struct{}{}
-		whitelist = append(whitelist, domain)
+		seen[key] = struct{}{}
+		whitelist = append(whitelist, rule)
 	}
 	return whitelist
 }
 
+func normalizeDomainRule(entry string) (domainRule, bool) {
+	entry = strings.TrimSpace(entry)
+	exclude := strings.HasPrefix(entry, "-")
+	if exclude {
+		entry = strings.TrimSpace(strings.TrimPrefix(entry, "-"))
+	}
+
+	host, port := splitDomainRulePort(entry)
+	host = normalizeDomain(host)
+	if host == "" {
+		return domainRule{}, false
+	}
+
+	rule := domainRule{exclude: exclude, pattern: host, port: port}
+	if strings.ContainsAny(host, "*?") {
+		rule.regexp = compileDomainWildcard(host)
+	}
+	return rule, true
+}
+
+func splitDomainRulePort(entry string) (string, string) {
+	if host, port, err := net.SplitHostPort(entry); err == nil {
+		return host, normalizePort(port)
+	}
+	if strings.Count(entry, ":") == 1 {
+		idx := strings.LastIndex(entry, ":")
+		port := normalizePort(entry[idx+1:])
+		if port != "" {
+			return entry[:idx], port
+		}
+	}
+	return entry, ""
+}
+
+func normalizePort(port string) string {
+	port = strings.TrimSpace(port)
+	if port == "" {
+		return ""
+	}
+	for _, r := range port {
+		if r < '0' || r > '9' {
+			return ""
+		}
+	}
+	return port
+}
+
+func compileDomainWildcard(pattern string) *regexp.Regexp {
+	var b strings.Builder
+	b.WriteString("^")
+	for _, r := range pattern {
+		switch r {
+		case '*':
+			b.WriteString(".*")
+		case '?':
+			b.WriteString(".")
+		default:
+			b.WriteString(regexp.QuoteMeta(string(r)))
+		}
+	}
+	b.WriteString("$")
+	return regexp.MustCompile(b.String())
+}
+
+func (r domainRule) key() string {
+	if r.exclude {
+		return "-" + r.pattern + ":" + r.port
+	}
+	return r.pattern + ":" + r.port
+}
+
+func (r domainRule) matches(target domainTarget) bool {
+	if !r.matchesHost(target.host) {
+		return false
+	}
+	return r.matchesPort(target.port)
+}
+
+func (r domainRule) matchesHost(host string) bool {
+	if r.regexp != nil {
+		return r.regexp.MatchString(host)
+	}
+	return host == r.pattern || strings.HasSuffix(host, "."+r.pattern)
+}
+
+func (r domainRule) matchesPort(port string) bool {
+	if r.port == "0" {
+		return true
+	}
+	if r.port != "" {
+		return port == r.port
+	}
+	return port == "" || port == "80" || port == "443"
+}
+
+type domainTarget struct {
+	host string
+	port string
+}
+
+func normalizeTargetHostPort(rawHost, scheme string) domainTarget {
+	host := rawHost
+	port := ""
+	if parsedHost, parsedPort, err := net.SplitHostPort(rawHost); err == nil {
+		host = parsedHost
+		port = parsedPort
+	} else if strings.Count(rawHost, ":") == 1 {
+		idx := strings.LastIndex(rawHost, ":")
+		if parsedPort := normalizePort(rawHost[idx+1:]); parsedPort != "" {
+			host = rawHost[:idx]
+			port = parsedPort
+		}
+	}
+	if port == "" {
+		port = defaultPort(scheme)
+	}
+	return domainTarget{host: normalizeDomain(host), port: port}
+}
+
+func defaultPort(scheme string) string {
+	switch strings.ToLower(scheme) {
+	case "http":
+		return "80"
+	case "https":
+		return "443"
+	default:
+		return ""
+	}
+}
+
 func normalizeDomain(domain string) string {
 	domain = strings.Trim(strings.ToLower(strings.TrimSpace(domain)), ".")
+	domain = strings.TrimPrefix(strings.TrimSuffix(domain, "]"), "[")
 	if domain == "" {
 		return ""
 	}

@@ -321,6 +321,58 @@ func TestDomainWhitelistAllowsExactAndSubdomain(t *testing.T) {
 	}
 }
 
+func TestDomainWhitelistSupportsWildcardAndExcludeRules(t *testing.T) {
+	whitelist := normalizeDomainWhitelist([]string{"*.example.com", "-private.example.com", "api?.example.org"})
+
+	tests := []struct {
+		host string
+		want bool
+	}{
+		{host: "api.example.com", want: true},
+		{host: "nested.api.example.com", want: true},
+		{host: "private.example.com", want: false},
+		{host: "example.com", want: false},
+		{host: "api1.example.org", want: true},
+		{host: "api12.example.org", want: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.host, func(t *testing.T) {
+			if got := isDomainAllowed(tt.host, whitelist); got != tt.want {
+				t.Fatalf("isDomainAllowed(%q) = %v, want %v", tt.host, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestDomainWhitelistSupportsPortRules(t *testing.T) {
+	whitelist := normalizeDomainWhitelist([]string{"example.com", "api.example.com:8443", "static.example.com:0"})
+
+	tests := []struct {
+		rawURL string
+		want   bool
+	}{
+		{rawURL: "https://example.com/path", want: true},
+		{rawURL: "https://example.com:443/path", want: true},
+		{rawURL: "https://example.com:8443/path", want: false},
+		{rawURL: "https://api.example.com:8443/path", want: true},
+		{rawURL: "https://api.example.com:9443/path", want: false},
+		{rawURL: "https://static.example.com:9443/path", want: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.rawURL, func(t *testing.T) {
+			targetURL, err := url.Parse(tt.rawURL)
+			if err != nil {
+				t.Fatalf("url.Parse() error = %v", err)
+			}
+			if got := isDomainURLAllowed(targetURL, whitelist); got != tt.want {
+				t.Fatalf("isDomainURLAllowed(%q) = %v, want %v", tt.rawURL, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestProxyRejectsDomainOutsideWhitelist(t *testing.T) {
 	proxy, err := NewProxy(Config{DomainWhitelist: []string{"example.com"}})
 	if err != nil {
@@ -350,7 +402,7 @@ func TestProxyRejectsRedirectOutsideWhitelist(t *testing.T) {
 	if err != nil {
 		t.Fatalf("url.Parse() error = %v", err)
 	}
-	proxy, err := NewProxy(Config{DomainWhitelist: []string{allowedURL.Hostname()}})
+	proxy, err := NewProxy(Config{DomainWhitelist: []string{allowedURL.Host}})
 	if err != nil {
 		t.Fatalf("NewProxy() error = %v", err)
 	}
